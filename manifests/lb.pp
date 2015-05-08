@@ -4,7 +4,7 @@ define hydra::lb (
   $subnet_mask = '255.255.255.0',
   $box_a_sub_ip,
   $box_b_sub_ip,
-  $ports = ['80', '443'],
+  $ports = ['80:80', '443:443'],
   $vip_ip,
   $vip_id,
   $vip_password,
@@ -56,6 +56,8 @@ define hydra::lb (
     }
   }
 
+  $docker_ports = prefix($ports, "${source_address}:")
+
   if $lb_config_repo {
     unless $lb_config_branch {
       fail('if you specify a repo, you must also specify the branch (lb_config_branch)')
@@ -88,19 +90,50 @@ define hydra::lb (
       require => File["/docker/hydra/${app_name}"]
     }
 
+
     docker::run {"${app_name}-lb":
       image => $lb_container,
-      ports   => $ports,
+      ports   => $docker_ports,
       volumes => ["/docker/hydra/${app_name}:/etc/lbconfig"],
-      env     => [ "\'CONSUL_TEMPLATE_ARGS=${nginx_consul_template_args} -template /etc/lbconfig/nginx.tmpl:/etc/nginx/nginx.conf:${lb_reload_cmd}\'" 
-],
+      env     => [ "\'CONSUL_TEMPLATE_ARGS=${nginx_consul_template_args} -template /etc/lbconfig/nginx.tmpl:/etc/nginx/nginx.conf:${lb_reload_cmd}\'"],
     }
   } else {
     docker::run {"${app_name}-lb":
       image => $lb_container,
-      ports   => $ports,
+      ports   => $docker_ports,
       env     => [ "\'APPNAME=${app_name}\'", "\'CONSUL_TEMPLATE_ARGS=${consul_args} -template /etc/consul-templates/nginx.conf:/etc/nginx/nginx.conf:${lb_reload_cmd}\'" ],
     }
+  }
+
+  unless defined(Service['firewalld']) {
+    service {'firewalld': 
+      enable => false
+    }
+  }
+
+  unless defined(Package['iptables-services']) {
+    package{ 'iptables-services':
+      ensure => present
+    }
+  }
+
+  unless defined(Package['iptables']) {
+    service{ 'iptables':
+      enable => true,
+      ensure => 'running',
+      require => Package['iptables-services']
+    }
+  }
+
+  firewall { "001 ${app_name} vip nat":
+    chain       => 'PREROUTING',
+    jump        => 'DNAT',
+    proto       => 'all',
+    #outiface    => $parent_interface,
+    table       => 'nat',
+    destination => $vip_ip,
+    todest      => $source_address,
+    require     => Service['iptables']
   }
 }
 
