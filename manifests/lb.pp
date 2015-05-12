@@ -38,13 +38,25 @@ define hydra::lb (
     vip_address    => $vip_ip,
     source_address => $source_address,
     password       => $vip_password,
-    options        => $ucarp_options
+    options        => $ucarp_options,
+    require        => Network::Alias["${parent_interface}:${app_name}"]
   }
 
-  network::if::static { "${parent_interface}:${app_name}":
+
+  #FIXME make sure networkmanager isn't involved in kickstarted boxes
+  network::alias { "${parent_interface}:${app_name}":
     ensure    => 'up',
     ipaddress => $source_address,
-    netmask   => $subnet_mask
+    netmask   => $subnet_mask,
+    notify    => Exec["${parent_interface}:${app_name} ifup"],
+    #require   => Service['NetworkManager']
+  }
+
+  exec{ "${parent_interface}:${app_name} ifup":
+    path        => "/usr/sbin",
+    command     => "/usr/sbin/ifup ${parent_interface}:${app_name}",
+    refreshonly => true,
+    require     => Network::Alias["${parent_interface}:${app_name}"]
   }
 
   case $lb_engine {
@@ -119,11 +131,40 @@ define hydra::lb (
 
   unless defined(Package['iptables']) {
     service{ 'iptables':
-      enable => true,
-      ensure => 'running',
-      require => Package['iptables-services']
+      enable      => true,
+      ensure      => 'running',
+      require     => Package['iptables-services'],
+      notify      => Exec["flush iptables"],
     }
+
+    case $::osfamily {
+      redhat: {
+        exec{ "flush iptables":
+          path        => "/usr/sbin",
+          command     => "/usr/sbin/iptables -F ; /usr/sbin/iptables -t nat -F",
+          refreshonly => true,
+          notify      => Exec['save iptables'],
+        }
+        exec{ "save iptables":
+          path        => "/usr/sbin",
+          command     => "/usr/sbin/iptables-save > /etc/sysconfig/iptables ; /usr/sbin/iptables-save > /etc/sysconfig/iptables.save",
+          refreshonly => true,
+          notify      => Service['docker'],
+        }
+      }
+      default: {
+        fail("Unsupported platform: ${::osfamily}/${::operatingsystem}")
+      }
+    }
+
   }
+
+####  unless defined(Service['NetworkManager']) {
+####    service{ 'NetworkManager':
+####      enable => false,
+####      ensure => 'stopped'
+####    }
+####  }
 
   firewall { "001 ${app_name} vip nat":
     chain       => 'PREROUTING',
@@ -135,5 +176,28 @@ define hydra::lb (
     todest      => $source_address,
     require     => Service['iptables']
   }
+
+  firewall { "002 ${app_name} vip nat":
+    chain       => 'POSTROUTING',
+    jump        => 'SNAT',
+    proto       => 'all',
+    #outiface    => $parent_interface,
+    table       => 'nat',
+    destination => $source_address,
+    tosource    => $vip_ip,
+    require     => Service['iptables']
+  }
+
+  firewall { "003 ${app_name} vip nat":
+    chain       => 'OUTPUT',
+    jump        => 'DNAT',
+    proto       => 'all',
+    #outiface    => $parent_interface,
+    table       => 'nat',
+    destination => $vip_ip,
+    todest      => $source_address,
+    require     => Service['iptables']
+  }
+
 }
 
